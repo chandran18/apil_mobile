@@ -113,7 +113,7 @@ def _pending_weight_priced(doctype):
 	date_field = "transaction_date" if doctype == "Sales Order" else "posting_date"
 	return frappe.db.sql(
 		f"""
-		select distinct p.name, p.customer, p.{date_field} as txn_date, p.grand_total
+		select distinct p.name, p.customer, p.{date_field} as txn_date, p.base_grand_total as grand_total
 		from `tab{doctype}` p
 		inner join `tab{doctype} Item` c on c.parent = p.name
 		where p.docstatus = 0 and c.custom_catalogue_weight > 0
@@ -149,14 +149,14 @@ def get_pending_approvals():
 		"sales_orders": _pending_weight_priced("Sales Order"),
 		"sales_invoices": _pending_weight_priced("Sales Invoice"),
 		"purchase_orders": _pending_simple(
-			"Purchase Order", ["name", "supplier", "transaction_date", "grand_total"]
+			"Purchase Order", ["name", "supplier", "transaction_date", "base_grand_total as grand_total"]
 		),
 		"purchase_invoices": _pending_simple(
-			"Purchase Invoice", ["name", "supplier", "posting_date", "due_date", "grand_total"]
+			"Purchase Invoice", ["name", "supplier", "posting_date", "due_date", "base_grand_total as grand_total"]
 		),
 		"payment_entries": _pending_simple(
 			"Payment Entry",
-			["name", "party", "posting_date", "payment_type", "paid_amount"],
+			["name", "party", "posting_date", "payment_type", "base_paid_amount as paid_amount"],
 		),
 	}
 
@@ -203,7 +203,14 @@ def approve_document(doctype, name):
 
 	limit = _approval_limit_for(doctype)
 	if limit is not None:
-		amount = flt(doc.get("grand_total") or doc.get("paid_amount") or 0)
+		# base_* (company-currency) amounts, never the transaction-currency
+		# grand_total/paid_amount: this site raises some Purchase Orders in
+		# USD, and Mobile Approval Limit.max_amount is configured in company
+		# currency (KES) - comparing a foreign-currency amount directly
+		# against a KES limit would silently let a USD purchase far over the
+		# real limit slip through (e.g. $80k read as "80,000" against a
+		# 500,000 KES limit, when it's actually worth ~10.5M KES).
+		amount = flt(doc.get("base_grand_total") or doc.get("base_paid_amount") or 0)
 		if amount > limit:
 			frappe.throw(
 				f"This {doctype} ({amount}) exceeds your mobile approval limit of {limit} for {doctype}.",
@@ -623,7 +630,7 @@ def get_procurement_summary():
 
 	open_po = frappe.db.sql(
 		"""
-		select count(*) as cnt, sum(grand_total) as val
+		select count(*) as cnt, sum(base_grand_total) as val
 		from `tabPurchase Order`
 		where docstatus = 1 and (per_received < 100 or per_billed < 100)
 		""",
