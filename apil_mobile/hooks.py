@@ -5,10 +5,51 @@ app_description = "Mobile app integration (device registration, push notificatio
 app_email = "admin@example.com"
 app_license = "mit"
 
+# Fixtures: the mobile approval role, its Sales Order/Sales Invoice
+# permissions, and the report access it needs - split out of apil_custom
+# so this app can be installed on its own on any site (the notification
+# hook below still checks for weight-priced items, which requires
+# apil_custom's custom fields to exist - see required_apps below).
+fixtures = [
+	{
+		"doctype": "Role",
+		"filters": [
+			[
+				"name", "=", "APIL Mobile Approver"
+			]
+		]
+	},
+	{
+		"doctype": "Custom DocPerm",
+		"filters": [
+			[
+				"role", "=", "APIL Mobile Approver"
+			]
+		]
+	},
+	{
+		"doctype": "Custom Role",
+		"filters": [
+			[
+				"report", "in", [
+					"Accounts Payable",
+					"Purchase Register",
+					"Stock Balance",
+					"Profit and Loss Statement",
+					"General Ledger",
+				]
+			]
+		]
+	}
+]
+
 # Apps
 # ------------------
 
-# required_apps = []
+# This app's notify_new_weight_priced_document hook only fires for items
+# that carry apil_custom's custom_catalogue_weight field, so it depends on
+# that app being installed alongside it.
+required_apps = ["apil_custom"]
 
 # Each item in the list will be shown as an app in the apps page
 # add_to_apps_screen = [
@@ -137,13 +178,14 @@ app_license = "mit"
 # ---------------
 # Hook on document methods and events
 
-# doc_events = {
-# 	"*": {
-# 		"on_update": "method",
-# 		"on_cancel": "method",
-# 		"on_trash": "method"
-# 	}
-# }
+doc_events = {
+	"Sales Order": {
+		"after_insert": "apil_mobile.mobile_notifications.notify_new_weight_priced_document",
+	},
+	"Sales Invoice": {
+		"after_insert": "apil_mobile.mobile_notifications.notify_new_weight_priced_document",
+	},
+}
 
 # Scheduled Tasks
 # ---------------
