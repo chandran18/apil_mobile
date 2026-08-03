@@ -1,0 +1,51 @@
+{
+ "add_total_row": 1,
+ "add_translate_data": 0,
+ "columns": [],
+ "disabled": 0,
+ "docstatus": 0,
+ "doctype": "Report",
+ "filters": [
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company"
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "label": "Customer",
+   "options": "Customer"
+  },
+  {
+   "fieldname": "from_date",
+   "fieldtype": "Date",
+   "label": "From Date"
+  },
+  {
+   "fieldname": "to_date",
+   "fieldtype": "Date",
+   "label": "To Date"
+  }
+ ],
+ "idx": 0,
+ "is_standard": "Yes",
+ "letterhead": null,
+ "module": "APIL Mobile",
+ "name": "Delivery Note Report",
+ "owner": "Administrator",
+ "prepared_report": 0,
+ "ref_doctype": "Delivery Note",
+ "report_name": "Delivery Note Report",
+ "report_type": "Script Report",
+ "roles": [
+  {
+   "role": "System Manager"
+  },
+  {
+   "role": "APIL Mobile Approver"
+  }
+ ],
+ "timeout": 0
+}
