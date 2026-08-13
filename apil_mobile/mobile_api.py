@@ -466,6 +466,52 @@ def get_spend_trend(period="YTD"):
 
 
 @frappe.whitelist()
+def get_sales_trend(period="YTD"):
+	"""Sales revenue over time - same shape and bucketing as get_spend_trend,
+	just over Sales Invoice instead of Purchase Invoice.
+	"""
+	if not frappe.has_permission("Sales Invoice", "report"):
+		return {"points": [], "labels": [], "total": 0, "is_thin": True}
+
+	start, end, bucket, fmt = _period_range(period)
+	date_expr = "posting_date" if bucket == "day" else "DATE_FORMAT(posting_date, '%%Y-%%m-01')"
+
+	rows = frappe.db.sql(
+		f"""
+		select {date_expr} as bucket, sum(base_grand_total) as total
+		from `tabSales Invoice`
+		where docstatus = 1 and posting_date between %s and %s
+		group by bucket
+		order by bucket asc
+		""",
+		(start, end),
+		as_dict=True,
+	)
+	by_bucket = {getdate(r.bucket).strftime(fmt): flt(r.total) for r in rows}
+
+	labels = []
+	cursor = start.replace(day=1) if bucket == "month" else start
+	while cursor <= end:
+		labels.append(cursor.strftime(fmt))
+		if bucket == "day":
+			cursor = cursor + timedelta(days=1)
+		else:
+			next_month = 1 if cursor.month == 12 else cursor.month + 1
+			next_year = cursor.year + 1 if cursor.month == 12 else cursor.year
+			cursor = cursor.replace(year=next_year, month=next_month, day=1)
+	points = [by_bucket.get(label, 0.0) for label in labels]
+	total = sum(points)
+
+	return {
+		"points": points,
+		"labels": labels,
+		"total": total,
+		"period": period,
+		"is_thin": len(points) < 5,
+	}
+
+
+@frappe.whitelist()
 def get_expense_breakdown():
 	"""Real expense mix by GL account (root_type Expense), not the demo
 	spec's fictional Materials/Payroll/Logistics categories - whatever
