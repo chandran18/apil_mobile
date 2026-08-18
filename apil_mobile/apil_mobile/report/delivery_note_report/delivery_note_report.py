@@ -12,7 +12,8 @@ def get_columns():
 	return [
 		{"label": "Delivery Note", "fieldname": "name", "fieldtype": "Link", "options": "Delivery Note", "width": 130},
 		{"label": "Date", "fieldname": "posting_date", "fieldtype": "Date", "width": 95},
-		{"label": "Customer", "fieldname": "customer", "fieldtype": "Link", "options": "Customer", "width": 180},
+		{"label": "Customer Name", "fieldname": "customer_name", "fieldtype": "Data", "width": 180},
+		{"label": "Customer", "fieldname": "customer", "fieldtype": "Link", "options": "Customer", "width": 130},
 		{"label": "Company", "fieldname": "company", "fieldtype": "Link", "options": "Company", "width": 150},
 		{"label": "Status", "fieldname": "status", "fieldtype": "Data", "width": 90},
 		{"label": "Grand Total", "fieldname": "grand_total", "fieldtype": "Currency", "width": 120},
@@ -41,7 +42,7 @@ def get_data(filters):
 
 	return frappe.db.sql(
 		"""
-		select dn.name, dn.posting_date, dn.customer, dn.company, dn.status, dn.grand_total
+		select dn.name, dn.posting_date, dn.customer, dn.customer_name, dn.company, dn.status, dn.grand_total
 		from `tabDelivery Note` dn
 		where {conditions}
 		order by dn.posting_date desc, dn.name desc

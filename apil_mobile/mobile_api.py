@@ -82,38 +82,16 @@ def register_device_token(fcm_token, device_type=None, app_version=None):
 	return {"ok": True}
 
 
-def _pending_stock_entries():
-	if not frappe.has_permission("Stock Entry", "submit"):
-		return []
-
-	entries = frappe.get_all(
-		"Stock Entry",
-		filters={"stock_entry_type": "Manufacture", "docstatus": 0},
-		fields=["name", "posting_date", "company", "remarks"],
-		order_by="creation desc",
-	)
-	for entry in entries:
-		log = frappe.db.get_value(
-			"Extrusion Log",
-			{"stock_entry": entry.name},
-			["name", "date", "shift", "die_no", "sec_no", "ok_pcs", "output"],
-			as_dict=True,
-		)
-		entry["extrusion_log"] = log
-	return entries
-
-
 def _pending_weight_priced(doctype):
-	"""doctype is always one of the two hardcoded call sites below, never
-	client input - safe to interpolate into the table names.
+	"""doctype is always the hardcoded call site below, never client input -
+	safe to interpolate into the table name.
 	"""
 	if not frappe.has_permission(doctype, "submit"):
 		return []
 
-	date_field = "transaction_date" if doctype == "Sales Order" else "posting_date"
 	return frappe.db.sql(
 		f"""
-		select distinct p.name, p.customer, p.{date_field} as txn_date, p.base_grand_total as grand_total
+		select distinct p.name, p.customer, p.customer_name, p.transaction_date as txn_date, p.base_grand_total as grand_total
 		from `tab{doctype}` p
 		inner join `tab{doctype} Item` c on c.parent = p.name
 		where p.docstatus = 0 and c.custom_catalogue_weight > 0
@@ -125,8 +103,8 @@ def _pending_weight_priced(doctype):
 
 def _pending_simple(doctype, fields):
 	"""Plain "docstatus = 0" draft list for doctypes with no extra business
-	filter (unlike Sales Order/Invoice, which only surface weight-priced
-	rows). doctype is always one of the hardcoded call sites below.
+	filter (unlike Sales Order, which only surfaces weight-priced rows).
+	doctype is always the hardcoded call site below.
 	"""
 	if not frappe.has_permission(doctype, "submit"):
 		return []
@@ -141,22 +119,18 @@ def _pending_simple(doctype, fields):
 @frappe.whitelist()
 def get_pending_approvals():
 	"""Everything the calling user can currently act on from the mobile app,
-	grouped by document type. Permission-filtered per category so a user only
-	ever sees categories they hold submit rights for.
+	grouped by document type. Scoped to Sales Order and Purchase Order only -
+	the two document types this business actually reviews before submission;
+	Stock Entry/Sales Invoice/Purchase Invoice/Payment Entry were dropped from
+	here since they aren't part of that review process. Permission-filtered
+	per category so a user only ever sees categories they hold submit rights
+	for.
 	"""
 	return {
-		"stock_entries": _pending_stock_entries(),
 		"sales_orders": _pending_weight_priced("Sales Order"),
-		"sales_invoices": _pending_weight_priced("Sales Invoice"),
 		"purchase_orders": _pending_simple(
-			"Purchase Order", ["name", "supplier", "transaction_date", "base_grand_total as grand_total"]
-		),
-		"purchase_invoices": _pending_simple(
-			"Purchase Invoice", ["name", "supplier", "posting_date", "due_date", "base_grand_total as grand_total"]
-		),
-		"payment_entries": _pending_simple(
-			"Payment Entry",
-			["name", "party", "posting_date", "payment_type", "base_paid_amount as paid_amount"],
+			"Purchase Order",
+			["name", "supplier", "supplier_name", "transaction_date", "base_grand_total as grand_total"],
 		),
 	}
 
@@ -323,20 +297,12 @@ def get_dashboard_summary():
 	# every approvable category, newest first, so it's not always just the
 	# same doctype's queue.
 	party_fields = {
-		"stock_entries": "company",
-		"sales_orders": "customer",
-		"sales_invoices": "customer",
-		"purchase_orders": "supplier",
-		"purchase_invoices": "supplier",
-		"payment_entries": "party",
+		"sales_orders": "customer_name",
+		"purchase_orders": "supplier_name",
 	}
 	doctype_labels = {
-		"stock_entries": "Stock Entry",
 		"sales_orders": "Sales Order",
-		"sales_invoices": "Sales Invoice",
 		"purchase_orders": "Purchase Order",
-		"purchase_invoices": "Purchase Invoice",
-		"payment_entries": "Payment Entry",
 	}
 	preview = []
 	for key, rows in approvals.items():
@@ -345,7 +311,7 @@ def get_dashboard_summary():
 				"doctype": doctype_labels[key],
 				"name": row.get("name"),
 				"party": row.get(party_fields[key]),
-				"amount": row.get("grand_total") or row.get("paid_amount"),
+				"amount": row.get("grand_total"),
 			})
 	summary["needs_your_decision"] = preview[:3]
 

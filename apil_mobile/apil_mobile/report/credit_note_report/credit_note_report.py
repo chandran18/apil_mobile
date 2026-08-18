@@ -12,7 +12,8 @@ def get_columns():
 	return [
 		{"label": "Credit Note", "fieldname": "name", "fieldtype": "Link", "options": "Sales Invoice", "width": 130},
 		{"label": "Date", "fieldname": "posting_date", "fieldtype": "Date", "width": 95},
-		{"label": "Customer", "fieldname": "customer", "fieldtype": "Link", "options": "Customer", "width": 180},
+		{"label": "Customer Name", "fieldname": "customer_name", "fieldtype": "Data", "width": 180},
+		{"label": "Customer", "fieldname": "customer", "fieldtype": "Link", "options": "Customer", "width": 130},
 		{"label": "Company", "fieldname": "company", "fieldtype": "Link", "options": "Company", "width": 150},
 		{"label": "Against Invoice", "fieldname": "return_against", "fieldtype": "Link", "options": "Sales Invoice", "width": 130},
 		{"label": "Grand Total", "fieldname": "grand_total", "fieldtype": "Currency", "width": 120},
@@ -44,7 +45,7 @@ def get_data(filters):
 
 	return frappe.db.sql(
 		"""
-		select si.name, si.posting_date, si.customer, si.company, si.return_against, si.grand_total
+		select si.name, si.posting_date, si.customer, si.customer_name, si.company, si.return_against, si.grand_total
 		from `tabSales Invoice` si
 		where {conditions}
 		order by si.posting_date desc, si.name desc
