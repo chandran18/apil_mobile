@@ -154,6 +154,63 @@ def _pending_credit_limit_approvals():
 	return rows
 
 
+def _over_limit_customers():
+	"""Customers who are ALREADY over their credit limit right now, independent
+	of any specific pending Sales Order/Workflow instance - the complement to
+	_pending_credit_limit_approvals, which only ever surfaces a customer once a
+	new order actually hits the "first time customer" workflow. This is what
+	makes the Credit Limit tab show real, actionable data even when nothing is
+	currently sitting in that workflow.
+	"""
+	if not frappe.has_permission("Customer", "write"):
+		return []
+
+	company = frappe.defaults.get_global_default("company")
+	if not company:
+		return []
+
+	from erpnext.selling.doctype.customer.customer import get_credit_limit, get_customer_outstanding
+
+	rows = []
+	for customer in frappe.get_all("Customer", filters={"disabled": 0}, fields=["name", "customer_name"]):
+		credit_limit = get_credit_limit(customer.name, company)
+		if not credit_limit:
+			continue
+		outstanding = get_customer_outstanding(customer.name, company)
+		if outstanding <= credit_limit:
+			continue
+		# Already granted an exception for this company - showing them again
+		# every time would make "approve" nothing but a repeated no-op click.
+		bypassed = frappe.db.get_value(
+			"Customer Credit Limit",
+			{"parent": customer.name, "parenttype": "Customer", "company": company},
+			"bypass_credit_limit_check",
+		)
+		if bypassed:
+			continue
+		rows.append({
+			"customer": customer.name,
+			"customer_name": customer.customer_name,
+			"company": company,
+			"credit_limit": credit_limit,
+			"outstanding_amount": outstanding,
+		})
+	return rows
+
+
+@frappe.whitelist()
+def approve_customer_credit_bypass(customer, company):
+	"""Directly enables bypass_credit_limit_check for a customer already over
+	their limit - no specific Sales Order/Workflow instance involved, unlike
+	approve_credit_limit_sales_order.
+	"""
+	if not frappe.has_permission("Customer", "write"):
+		frappe.throw("You are not permitted to act on this document.", frappe.PermissionError)
+
+	_apply_credit_bypass(customer, company, reference_doctype="Customer", reference_name=customer)
+	return {"ok": True}
+
+
 @frappe.whitelist()
 def get_pending_approvals():
 	"""Everything the calling user can currently act on from the mobile app,
@@ -171,6 +228,7 @@ def get_pending_approvals():
 			["name", "supplier", "supplier_name", "transaction_date", "base_grand_total as grand_total"],
 		),
 		"credit_limit_approvals": _pending_credit_limit_approvals(),
+		"credit_limit_customers": _over_limit_customers(),
 	}
 
 
@@ -235,38 +293,37 @@ def approve_document(doctype, name):
 	return {"ok": True, "docstatus": doc.docstatus}
 
 
-def _record_credit_limit_override(doc):
-	"""Runs once a first-time-customer Sales Order clears its final workflow
-	stage - both the Sales Master Manager and System Manager have now signed
-	off, so future orders for this customer/company shouldn't need to repeat
-	the same review. Sets bypass_credit_limit_check on their Customer Credit
-	Limit row (adding one if this company has none yet) and records the
+def _apply_credit_bypass(customer, company, reference_doctype, reference_name):
+	"""Sets bypass_credit_limit_check on a customer's Customer Credit Limit
+	row for this company (adding one if it has none yet) and records the
 	decision in Credit Limit Override Log for audit, mirroring what that
-	doctype is already used for elsewhere in the aqiq_pdc app.
+	doctype is already used for elsewhere in the aqiq_pdc app. Shared by both
+	approval paths - a first-time-customer Sales Order clearing its workflow,
+	and directly approving a customer already found over their limit.
 	"""
 	from erpnext.selling.doctype.customer.customer import get_credit_limit, get_customer_outstanding
 
-	credit_limit = get_credit_limit(doc.customer, doc.company)
-	outstanding = get_customer_outstanding(doc.customer, doc.company)
+	credit_limit = get_credit_limit(customer, company)
+	outstanding = get_customer_outstanding(customer, company)
 
-	customer = frappe.get_doc("Customer", doc.customer)
-	row = next((r for r in customer.credit_limits if r.company == doc.company), None)
+	doc = frappe.get_doc("Customer", customer)
+	row = next((r for r in doc.credit_limits if r.company == company), None)
 	if row:
 		row.bypass_credit_limit_check = 1
 	else:
-		customer.append("credit_limits", {
-			"company": doc.company,
+		doc.append("credit_limits", {
+			"company": company,
 			"credit_limit": credit_limit,
 			"bypass_credit_limit_check": 1,
 		})
-	customer.save(ignore_permissions=True)
+	doc.save(ignore_permissions=True)
 
 	frappe.get_doc({
 		"doctype": "Credit Limit Override Log",
-		"customer": doc.customer,
-		"company": doc.company,
-		"reference_doctype": "Sales Order",
-		"reference_name": doc.name,
+		"customer": customer,
+		"company": company,
+		"reference_doctype": reference_doctype,
+		"reference_name": reference_name,
 		"credit_limit": credit_limit,
 		"outstanding_amount": outstanding,
 		"exceeded_by": outstanding - credit_limit,
@@ -295,7 +352,7 @@ def approve_credit_limit_sales_order(name):
 	doc.reload()
 
 	if doc.docstatus == 1:
-		_record_credit_limit_override(doc)
+		_apply_credit_bypass(doc.customer, doc.company, reference_doctype="Sales Order", reference_name=doc.name)
 
 	return {"ok": True, "workflow_state": doc.get("workflow_state"), "docstatus": doc.docstatus}
 
@@ -419,20 +476,22 @@ def get_dashboard_summary():
 		"sales_orders": "customer_name",
 		"purchase_orders": "supplier_name",
 		"credit_limit_approvals": "customer_name",
+		"credit_limit_customers": "customer_name",
 	}
 	doctype_labels = {
 		"sales_orders": "Sales Order",
 		"purchase_orders": "Purchase Order",
 		"credit_limit_approvals": "Sales Order",
+		"credit_limit_customers": "Customer",
 	}
 	preview = []
 	for key, rows in approvals.items():
 		for row in rows:
 			preview.append({
 				"doctype": doctype_labels[key],
-				"name": row.get("name"),
+				"name": row.get("name") or row.get("customer"),
 				"party": row.get(party_fields[key]),
-				"amount": row.get("grand_total"),
+				"amount": row.get("grand_total") or row.get("outstanding_amount"),
 			})
 	summary["needs_your_decision"] = preview[:3]
 
