@@ -301,8 +301,17 @@ def approve_credit_limit_sales_order(name):
 		# real problem and should still surface as-is.
 		if "Credit limit has been crossed" not in str(e):
 			raise
-		_apply_credit_bypass(doc.customer, doc.company, reference_doctype="Sales Order", reference_name=doc.name)
+		# submit() writes docstatus/workflow_state to the DB *before* running
+		# on_submit (where the credit check lives), so the failed attempt
+		# above already left an uncommitted docstatus=1 write sitting on this
+		# connection - reload() would read that straight back and the retry
+		# below would then see a document with no "Approve" transition left
+		# (it looks already Approved), failing as WorkflowTransitionError
+		# instead. Roll back that partial write first so the retry starts
+		# from the real last-committed state.
+		frappe.db.rollback()
 		doc.reload()
+		_apply_credit_bypass(doc.customer, doc.company, reference_doctype="Sales Order", reference_name=doc.name)
 		apply_workflow(doc, "Approve")
 
 	doc.reload()
