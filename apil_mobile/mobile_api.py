@@ -290,12 +290,22 @@ def approve_credit_limit_sales_order(name):
 	if not frappe.has_permission("Sales Order", "write", doc):
 		frappe.throw("You are not permitted to act on this document.", frappe.PermissionError)
 
-	apply_workflow(doc, "Approve")
-	doc.reload()
-
-	if doc.docstatus == 1:
+	try:
+		apply_workflow(doc, "Approve")
+	except frappe.ValidationError as e:
+		# The workflow's final "Approve" transition submits the Sales Order,
+		# which runs ERPNext's own credit-limit check *before* this review's
+		# bypass has been granted - the whole point of this approval is to
+		# grant it, so catch exactly that failure, grant the bypass now, and
+		# retry the same transition once. Any other validation error is a
+		# real problem and should still surface as-is.
+		if "Credit limit has been crossed" not in str(e):
+			raise
 		_apply_credit_bypass(doc.customer, doc.company, reference_doctype="Sales Order", reference_name=doc.name)
+		doc.reload()
+		apply_workflow(doc, "Approve")
 
+	doc.reload()
 	return {"ok": True, "workflow_state": doc.get("workflow_state"), "docstatus": doc.docstatus}
 
 
