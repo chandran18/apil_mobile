@@ -116,6 +116,33 @@ def _pending_simple(doctype, fields):
 	)
 
 
+def _pending_credit_limit_approvals():
+	"""Sales Orders sitting in the 'Sales Order First Time Customer Approval'
+	workflow, waiting on either the Sales Master Manager or System Manager
+	stage - see approve_credit_limit_sales_order for what happens once one
+	clears the final stage. Listing only needs write access; the workflow
+	engine itself is what enforces who can actually move a given document
+	from its current state (see apply_workflow in approve/reject below).
+	"""
+	if not frappe.has_permission("Sales Order", "write"):
+		return []
+	# workflow_state only exists on sites where a Workflow has actually been
+	# configured for Sales Order (Frappe adds the column dynamically when
+	# one's created) - sites without it just have nothing to show here yet,
+	# not an error.
+	if not frappe.get_meta("Sales Order").has_field("workflow_state"):
+		return []
+	return frappe.get_all(
+		"Sales Order",
+		filters={"workflow_state": ["in", ["Pending Approval", "Pending Final Approval"]]},
+		fields=[
+			"name", "customer", "customer_name", "company",
+			"transaction_date", "base_grand_total as grand_total", "workflow_state",
+		],
+		order_by="creation desc",
+	)
+
+
 @frappe.whitelist()
 def get_pending_approvals():
 	"""Everything the calling user can currently act on from the mobile app,
@@ -132,6 +159,7 @@ def get_pending_approvals():
 			"Purchase Order",
 			["name", "supplier", "supplier_name", "transaction_date", "base_grand_total as grand_total"],
 		),
+		"credit_limit_approvals": _pending_credit_limit_approvals(),
 	}
 
 
@@ -194,6 +222,86 @@ def approve_document(doctype, name):
 	doc.submit()
 	doc.add_comment("Comment", "Approved via mobile app")
 	return {"ok": True, "docstatus": doc.docstatus}
+
+
+def _record_credit_limit_override(doc):
+	"""Runs once a first-time-customer Sales Order clears its final workflow
+	stage - both the Sales Master Manager and System Manager have now signed
+	off, so future orders for this customer/company shouldn't need to repeat
+	the same review. Sets bypass_credit_limit_check on their Customer Credit
+	Limit row (adding one if this company has none yet) and records the
+	decision in Credit Limit Override Log for audit, mirroring what that
+	doctype is already used for elsewhere in the aqiq_pdc app.
+	"""
+	from erpnext.selling.doctype.customer.customer import get_credit_limit, get_customer_outstanding
+
+	credit_limit = get_credit_limit(doc.customer, doc.company)
+	outstanding = get_customer_outstanding(doc.customer, doc.company)
+
+	customer = frappe.get_doc("Customer", doc.customer)
+	row = next((r for r in customer.credit_limits if r.company == doc.company), None)
+	if row:
+		row.bypass_credit_limit_check = 1
+	else:
+		customer.append("credit_limits", {
+			"company": doc.company,
+			"credit_limit": credit_limit,
+			"bypass_credit_limit_check": 1,
+		})
+	customer.save(ignore_permissions=True)
+
+	frappe.get_doc({
+		"doctype": "Credit Limit Override Log",
+		"customer": doc.customer,
+		"company": doc.company,
+		"reference_doctype": "Sales Order",
+		"reference_name": doc.name,
+		"credit_limit": credit_limit,
+		"outstanding_amount": outstanding,
+		"exceeded_by": outstanding - credit_limit,
+		"approved_by": frappe.session.user,
+		"approved_on": now_datetime(),
+	}).insert(ignore_permissions=True)
+
+
+@frappe.whitelist()
+def approve_credit_limit_sales_order(name):
+	"""Advances a first-time-customer Sales Order through its real ERPNext
+	Workflow (Pending Approval -> Pending Final Approval -> Approved),
+	rather than calling doc.submit() directly like approve_document does -
+	this doctype's submission is workflow-gated, so a raw submit would
+	either fail or silently skip the review the workflow exists to enforce.
+	apply_workflow itself checks the calling user's role against the
+	transition allowed from the document's current state.
+	"""
+	from frappe.model.workflow import apply_workflow
+
+	doc = frappe.get_doc("Sales Order", name)
+	if not frappe.has_permission("Sales Order", "write", doc):
+		frappe.throw("You are not permitted to act on this document.", frappe.PermissionError)
+
+	apply_workflow(doc, "Approve")
+	doc.reload()
+
+	if doc.docstatus == 1:
+		_record_credit_limit_override(doc)
+
+	return {"ok": True, "workflow_state": doc.get("workflow_state"), "docstatus": doc.docstatus}
+
+
+@frappe.whitelist()
+def reject_credit_limit_sales_order(name, reason=None):
+	from frappe.model.workflow import apply_workflow
+
+	doc = frappe.get_doc("Sales Order", name)
+	if not frappe.has_permission("Sales Order", "write", doc):
+		frappe.throw("You are not permitted to act on this document.", frappe.PermissionError)
+
+	apply_workflow(doc, "Reject")
+	if reason:
+		doc.add_comment("Comment", f"Rejected via mobile app: {reason}")
+
+	return {"ok": True, "workflow_state": doc.get("workflow_state")}
 
 
 @frappe.whitelist()
@@ -299,10 +407,12 @@ def get_dashboard_summary():
 	party_fields = {
 		"sales_orders": "customer_name",
 		"purchase_orders": "supplier_name",
+		"credit_limit_approvals": "customer_name",
 	}
 	doctype_labels = {
 		"sales_orders": "Sales Order",
 		"purchase_orders": "Purchase Order",
+		"credit_limit_approvals": "Sales Order",
 	}
 	preview = []
 	for key, rows in approvals.items():
