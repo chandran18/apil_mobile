@@ -132,7 +132,7 @@ def _pending_credit_limit_approvals():
 	# not an error.
 	if not frappe.get_meta("Sales Order").has_field("workflow_state"):
 		return []
-	return frappe.get_all(
+	rows = frappe.get_all(
 		"Sales Order",
 		filters={"workflow_state": ["in", ["Pending Approval", "Pending Final Approval"]]},
 		fields=[
@@ -141,6 +141,17 @@ def _pending_credit_limit_approvals():
 		],
 		order_by="creation desc",
 	)
+
+	# The whole point of this review is a credit-limit exception - showing
+	# just the order amount without the customer's actual limit/outstanding
+	# leaves the approver guessing at the number the workflow exists to check.
+	from erpnext.selling.doctype.customer.customer import get_credit_limit, get_customer_outstanding
+
+	for row in rows:
+		row["credit_limit"] = get_credit_limit(row["customer"], row["company"])
+		row["outstanding_amount"] = get_customer_outstanding(row["customer"], row["company"])
+
+	return rows
 
 
 @frappe.whitelist()
