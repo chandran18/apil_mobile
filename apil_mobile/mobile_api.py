@@ -154,6 +154,64 @@ def _pending_credit_limit_approvals():
 	return rows
 
 
+def _over_limit_customers():
+	"""Customers who are ALREADY over their credit limit right now, independent
+	of any specific pending Sales Order/Workflow instance. The workflow behind
+	_pending_credit_limit_approvals is scoped to first-time customers only
+	(it's literally named "...First Time Customer Approval") - an existing
+	customer's Sales Order never enters that workflow at all, so without this,
+	an existing customer going over their limit has no in-app approval path
+	whatsoever and just hits ERPNext's plain credit-limit block directly.
+	"""
+	if not frappe.has_permission("Customer", "write"):
+		return []
+
+	company = frappe.defaults.get_global_default("company")
+	if not company:
+		return []
+
+	from erpnext.selling.doctype.customer.customer import get_credit_limit, get_customer_outstanding
+
+	rows = []
+	for customer in frappe.get_all("Customer", filters={"disabled": 0}, fields=["name", "customer_name"]):
+		credit_limit = get_credit_limit(customer.name, company)
+		if not credit_limit:
+			continue
+		outstanding = get_customer_outstanding(customer.name, company)
+		if outstanding <= credit_limit:
+			continue
+		# Already granted an exception for this company - showing them again
+		# every time would make "approve" nothing but a repeated no-op click.
+		bypassed = frappe.db.get_value(
+			"Customer Credit Limit",
+			{"parent": customer.name, "parenttype": "Customer", "company": company},
+			"bypass_credit_limit_check",
+		)
+		if bypassed:
+			continue
+		rows.append({
+			"customer": customer.name,
+			"customer_name": customer.customer_name,
+			"company": company,
+			"credit_limit": credit_limit,
+			"outstanding_amount": outstanding,
+		})
+	return rows
+
+
+@frappe.whitelist()
+def approve_customer_credit_bypass(customer, company):
+	"""Directly enables bypass_credit_limit_check for a customer already over
+	their limit - no specific Sales Order/Workflow instance involved, unlike
+	approve_credit_limit_sales_order.
+	"""
+	if not frappe.has_permission("Customer", "write"):
+		frappe.throw("You are not permitted to act on this document.", frappe.PermissionError)
+
+	_apply_credit_bypass(customer, company, reference_doctype="Customer", reference_name=customer)
+	return {"ok": True}
+
+
 @frappe.whitelist()
 def get_pending_approvals():
 	"""Everything the calling user can currently act on from the mobile app,
@@ -171,6 +229,7 @@ def get_pending_approvals():
 			["name", "supplier", "supplier_name", "transaction_date", "base_grand_total as grand_total"],
 		),
 		"credit_limit_approvals": _pending_credit_limit_approvals(),
+		"credit_limit_customers": _over_limit_customers(),
 	}
 
 
@@ -437,11 +496,13 @@ def get_dashboard_summary():
 		"sales_orders": "customer_name",
 		"purchase_orders": "supplier_name",
 		"credit_limit_approvals": "customer_name",
+		"credit_limit_customers": "customer_name",
 	}
 	doctype_labels = {
 		"sales_orders": "Sales Order",
 		"purchase_orders": "Purchase Order",
 		"credit_limit_approvals": "Sales Order",
+		"credit_limit_customers": "Customer",
 	}
 	preview = []
 	for key, rows in approvals.items():
