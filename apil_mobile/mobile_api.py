@@ -117,12 +117,17 @@ def _pending_simple(doctype, fields):
 
 
 def _pending_credit_limit_approvals():
-	"""Sales Orders sitting in the 'Sales Order First Time Customer Approval'
-	workflow, waiting on either the Sales Master Manager or System Manager
-	stage - see approve_credit_limit_sales_order for what happens once one
-	clears the final stage. Listing only needs write access; the workflow
-	engine itself is what enforces who can actually move a given document
-	from its current state (see apply_workflow in approve/reject below).
+	"""Unsubmitted Sales Orders that would breach the customer's credit limit
+	if submitted as-is - including plain Draft, not just the "Pending
+	Approval"/"Pending Final Approval" stages of the "Sales Order First Time
+	Customer Approval" workflow. That workflow only ever routes first-time
+	customers into those two states; an existing customer's order just sits
+	in Draft (or gets submitted directly) and never reaches them, so
+	watching only those two states misses exactly the orders this review
+	needs to catch for existing customers. Listing only needs write access;
+	the workflow engine itself is what enforces who can actually move a
+	given document from its current state (see apply_workflow in
+	approve/reject below).
 	"""
 	if not frappe.has_permission("Sales Order", "write"):
 		return []
@@ -134,7 +139,7 @@ def _pending_credit_limit_approvals():
 		return []
 	rows = frappe.get_all(
 		"Sales Order",
-		filters={"workflow_state": ["in", ["Pending Approval", "Pending Final Approval"]]},
+		filters={"docstatus": 0, "workflow_state": ["not in", ["", "Approved", "Rejected", "Cancelled"]]},
 		fields=[
 			"name", "customer", "customer_name", "company",
 			"transaction_date", "base_grand_total as grand_total", "workflow_state",
@@ -142,16 +147,34 @@ def _pending_credit_limit_approvals():
 		order_by="creation desc",
 	)
 
-	# The whole point of this review is a credit-limit exception - showing
-	# just the order amount without the customer's actual limit/outstanding
-	# leaves the approver guessing at the number the workflow exists to check.
+	# A still-unsubmitted order's own amount isn't part of the customer's
+	# outstanding balance yet (that only counts docstatus=1 documents) - the
+	# real question this review answers is "would submitting THIS order push
+	# them over", so the order's own amount has to be added to their current
+	# outstanding before comparing against the limit, not compared alone.
 	from erpnext.selling.doctype.customer.customer import get_credit_limit, get_customer_outstanding
 
+	result = []
 	for row in rows:
-		row["credit_limit"] = get_credit_limit(row["customer"], row["company"])
-		row["outstanding_amount"] = get_customer_outstanding(row["customer"], row["company"])
+		credit_limit = get_credit_limit(row["customer"], row["company"])
+		if not credit_limit:
+			continue
+		current_outstanding = get_customer_outstanding(row["customer"], row["company"])
+		projected_outstanding = current_outstanding + flt(row["grand_total"])
+		if projected_outstanding <= credit_limit:
+			continue
+		bypassed = frappe.db.get_value(
+			"Customer Credit Limit",
+			{"parent": row["customer"], "parenttype": "Customer", "company": row["company"]},
+			"bypass_credit_limit_check",
+		)
+		if bypassed:
+			continue
+		row["credit_limit"] = credit_limit
+		row["outstanding_amount"] = projected_outstanding
+		result.append(row)
 
-	return rows
+	return result
 
 
 def _over_limit_customers():
@@ -335,13 +358,19 @@ def _apply_credit_bypass(customer, company, reference_doctype, reference_name):
 
 @frappe.whitelist()
 def approve_credit_limit_sales_order(name):
-	"""Advances a first-time-customer Sales Order through its real ERPNext
-	Workflow (Pending Approval -> Pending Final Approval -> Approved),
-	rather than calling doc.submit() directly like approve_document does -
-	this doctype's submission is workflow-gated, so a raw submit would
-	either fail or silently skip the review the workflow exists to enforce.
+	"""Advances a Sales Order held up by the credit-limit review, rather than
+	calling doc.submit() directly like approve_document does - this
+	doctype's submission is workflow-gated, so a raw submit would either
+	fail or silently skip the review the workflow exists to enforce.
 	apply_workflow itself checks the calling user's role against the
 	transition allowed from the document's current state.
+
+	Two different starting states reach here: a first-time customer's order
+	sitting at "Pending Approval"/"Pending Final Approval" (advanced via
+	"Approve"), or an existing customer's order that never enters that
+	workflow at all and just sits in plain "Draft" (advanced via "Submit" -
+	Draft has no "Approve" transition, so using the wrong action name would
+	fail with WorkflowTransitionError).
 	"""
 	from frappe.model.workflow import apply_workflow
 
@@ -349,8 +378,10 @@ def approve_credit_limit_sales_order(name):
 	if not frappe.has_permission("Sales Order", "write", doc):
 		frappe.throw("You are not permitted to act on this document.", frappe.PermissionError)
 
+	action = "Submit" if doc.get("workflow_state") == "Draft" else "Approve"
+
 	try:
-		apply_workflow(doc, "Approve")
+		apply_workflow(doc, action)
 	except frappe.ValidationError as e:
 		# The workflow's final "Approve" transition submits the Sales Order,
 		# which runs ERPNext's own credit-limit check *before* this review's
@@ -371,7 +402,7 @@ def approve_credit_limit_sales_order(name):
 		frappe.db.rollback()
 		doc.reload()
 		_apply_credit_bypass(doc.customer, doc.company, reference_doctype="Sales Order", reference_name=doc.name)
-		apply_workflow(doc, "Approve")
+		apply_workflow(doc, action)
 
 	doc.reload()
 	return {"ok": True, "workflow_state": doc.get("workflow_state"), "docstatus": doc.docstatus}
@@ -385,10 +416,15 @@ def reject_credit_limit_sales_order(name, reason=None):
 	if not frappe.has_permission("Sales Order", "write", doc):
 		frappe.throw("You are not permitted to act on this document.", frappe.PermissionError)
 
-	apply_workflow(doc, "Reject")
+	# Draft has no "Reject" transition at all - it was never sent anywhere
+	# to reject, so leaving it in Draft already is the reject outcome; just
+	# record why instead of forcing a workflow transition that doesn't exist.
+	if doc.get("workflow_state") != "Draft":
+		apply_workflow(doc, "Reject")
 	if reason:
 		doc.add_comment("Comment", f"Rejected via mobile app: {reason}")
 
+	doc.reload()
 	return {"ok": True, "workflow_state": doc.get("workflow_state")}
 
 
